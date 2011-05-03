@@ -1,4 +1,4 @@
-This is the readme of the plugin.
-You should put here any useful information about 
-the plugin : install, configuration, ...
+This package controls the interaction between the forge and Mailman.
+It provides a single sign on authentication mecanism between the forge and Mailman.
+
 
