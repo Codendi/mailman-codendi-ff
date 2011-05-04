@@ -11,8 +11,8 @@
  */
 
 
-require_once 'mailman/include/MailmanList.class.php';
-require_once 'mailman/include/MailmanListFactory.class.php';
+require_once dirname(__FILE__) .'/../include/MailmanList.class.php';
+require_once dirname(__FILE__) .'/../include/MailmanListFactory.class.php';
 global $class;
 $current_user=UserManager::instance()->getCurrentUser();
 

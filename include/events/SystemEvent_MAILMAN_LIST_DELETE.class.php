@@ -19,7 +19,7 @@
  *
  * Portions Copyright 2010 (c) Mélanie Le Bail
  */
-require_once 'mailman/include/BackendMailmanList.class.php';
+require_once dirname(__FILE__) .'/../BackendMailmanList.class.php';
 
 /**
 * System Event classes

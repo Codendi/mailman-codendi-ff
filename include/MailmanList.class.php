@@ -34,8 +34,8 @@
  */
 
 require_once 'MailmanListDao.class.php';
-require_once 'ProjectManager.class.php';
-require_once 'UserManager.class.php';
+require_once 'common/project/ProjectManager.class.php';
+require_once 'common/user/UserManager.class.php';
 require_once 'common/dao/CodendiDataAccess.class.php';
 require_once 'common/system_event/SystemEventManager.class.php';
 require_once 'common/system_event/SystemEvent.class.php';
@@ -169,7 +169,7 @@ class MailmanList extends Error {
 
 		$this->groupMailmanListId = $result;
 		// Raise an event
-		require_once('mailman/include/events/SystemEvent_MAILMAN_LIST_CREATE.class.php');
+		require_once('events/SystemEvent_MAILMAN_LIST_CREATE.class.php');
 		$systemevent =	SystemEventManager::instance();
 		$systemevent->createEvent('MAILMAN_LIST_CREATE', $this->groupMailmanListId,SystemEvent::PRIORITY_MEDIUM);
 		$this->fetchData($this->groupMailmanListId);
@@ -452,7 +452,7 @@ class MailmanList extends Error {
 			$this->setError('Could Not Delete List: '.db_error());
 			return false;
 		}
-		require_once('mailman/include/events/SystemEvent_MAILMAN_LIST_DELETE.class.php');
+		require_once('events/SystemEvent_MAILMAN_LIST_DELETE.class.php');
 		$systemevent =	SystemEventManager::instance();
 		$systemevent->createEvent('MAILMAN_LIST_DELETE',  $this->groupMailmanListId,SystemEvent::PRIORITY_MEDIUM);
 
