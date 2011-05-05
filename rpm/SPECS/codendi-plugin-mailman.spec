@@ -1,7 +1,7 @@
 Summary: Mailman plugin for Codendi
 Name: codendi-plugin-mailman
 Version: 1.0
-Release: 0
+Release: 1
 License: GPL
 Group: Development/Languages
 URL: https://github.com/Codendi/mailman-codendi-ff/
@@ -34,6 +34,9 @@ It provides a single sign on authentication mecanism between the forge and mailm
 %files
 %defattr(-, codendiadm, codendiadm, 0755)
 %{_datadir}/codendi/plugins/mailman
+
+%post
+%{__cp} -a %{_datadir}/codendi/plugins/mailman/usr/lib/mailman/Mailman/Archiver/Archiver.py %{_libdir}/mailman/Mailman/Archiver/
 
 %changelog
 * Tue May 11 2010 Nicolas TERRAY <nicolas.terray@xrce.xerox.com> - 1.0
