@@ -12,6 +12,7 @@ Source: %{name}.tgz
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 
 BuildArch: noarch
+Requires: mailman = 3:2.1.9-4.codendi 
 
 %description
 Mailman plugin for Codendi
