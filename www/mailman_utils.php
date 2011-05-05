@@ -107,7 +107,7 @@ $p =& $plugin_manager->getPluginByName('mailman');
 			}
 			echo $currentList->getName().'</td> ';
 			echo '<td>';
-			if($currentList->getStatus() == '1') {
+			if(forge_get_config('mailman_lists_need_activation') && $currentList->getStatus() == '1') {
 				if($currentList->activationRequested()){
 					echo	_('Not activated yet');
 				}
