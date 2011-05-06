@@ -1,0 +1,1637 @@
+diff -ruN mailman.old/Mailman/Archiver/Archiver.py mailman/Mailman/Archiver/Archiver.py
+--- Mailman/Archiver/Archiver.py	2009-04-24 10:33:22.000000000 +0200
++++ Mailman/Archiver/Archiver.py	2010-11-04 08:45:42.000000000 +0100
+@@ -146,8 +146,6 @@
+                 'listname': self.internal_name(),
+                 'hostname': hostname
+                 }
+-            if not url.endswith('/'):
+-                url += '/'
+             return url
+ 
+     def __archive_file(self, afn):
+@@ -202,20 +200,25 @@
+                 # Archive to mbox only.
+                 return
+         txt = str(msg)
+-        # should we use the internal or external archiver?
++
++	# keep using the internal archiver
++        f = StringIO(txt)
++        import HyperArch
++        h = HyperArch.HyperArchive(self)
++        h.processUnixMailbox(f)
++        h.close()
++        f.close()
++        
++	# now, use the external archiver
+         private_p = self.archive_private
+         if mm_cfg.PUBLIC_EXTERNAL_ARCHIVER and not private_p:
+             self.ExternalArchive(mm_cfg.PUBLIC_EXTERNAL_ARCHIVER, txt)
+         elif mm_cfg.PRIVATE_EXTERNAL_ARCHIVER and private_p:
+             self.ExternalArchive(mm_cfg.PRIVATE_EXTERNAL_ARCHIVER, txt)
+-        else:
+-            # use the internal archiver
+-            f = StringIO(txt)
+-            import HyperArch
+-            h = HyperArch.HyperArchive(self)
+-            h.processUnixMailbox(f)
+-            h.close()
+-            f.close()
++        
++	# Mark Sapiro: "The above patch looks fine to me for what you want to do."
++	# http://mail.python.org/pipermail/mailman-users/2008-January/059900.html    
++        
+ 
+     #
+     # called from MailList.MailList.Save()
+diff -ruN mailman.old/Mailman/ExternalConnector.py mailman/Mailman/ExternalConnector.py
+--- Mailman/ExternalConnector.py	1970-01-01 01:00:00.000000000 +0100
++++ Mailman/ExternalConnector.py	2010-04-14 10:58:49.000000000 +0200
+@@ -0,0 +1,649 @@
++# Copyright (C) 1998-2008 by the Free Software Foundation, Inc.
++#
++# This program is free software; you can redistribute it and/or
++# modify it under the terms of the GNU General Public License
++# as published by the Free Software Foundation; either version 2
++# of the License, or (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
++# USA.
++
++
++import os
++import sys
++import re
++import time
++from types import StringType, TupleType
++
++from Errors import *
++from Mailman import Errors
++from Mailman import MemberAdaptor
++from Mailman import mm_cfg
++from Mailman import Utils
++from Mailman.Logging.Syslog import syslog
++from Mailman.Bouncer import _BounceInfo
++try:
++     from Mailman.Utils import md5_new
++except ImportError:
++     import md5
++     md5_new=md5.new
++ISREGULAR = 1
++ISDIGEST = 2
++tm_min = 4
++
++mm_cfg.connection = 0
++mm_cfg.cursor = 0
++
++try:
++    mm_cfg.MYSQL_MEMBER_CREATE_TABLE    
++    mm_cfg.MYSQL_MEMBER_DB_VERBOSE
++except AttributeError:
++    mm_cfg.MYSQL_MEMBER_DB_VERBOSE = False  # default value
++    mm_cfg.MYSQL_MEMBER_CREATE_TABLE = True
++    pass
++
++class ExternalConnector(MemberAdaptor.MemberAdaptor):
++	def __init__(self,mlist,param):
++		self._param=param
++		self.__mlist=mlist
++		self._members=None
++		self._member_passwd={}
++		self._member_names={}
++		self._updatetime = 0
++		# define the table and standard condition reflecting listname
++               	self._table = param['mailman_table'] 
++            	self._where = "listname = '%s'" %(self.__mlist.internal_name())
++
++		#define query for session management
++		self._cookiename=param['cookiename']	
++		self._queryCookieMail=param['queryCookieMail']
++		self._queryCookieId=param['queryCookieId']
++		self._queryIsAdmin=param['queryIsAdmin']
++		self._queryIsSiteAdmin=param['queryIsSiteAdmin']
++		self._queryIsMonitoring=param['queryIsMonitoring']
++		
++		self.__db_connect__()
++        	if mm_cfg.MYSQL_MEMBER_DB_VERBOSE:
++            	# Message to indicate successful init.
++            		message = "DBMemberships " \
++                		+ "$Revision: 1.69 $ initialized with host: %s (%s)" % (
++                		mm_cfg.connection.get_host_info(),
++                		mm_cfg.connection.get_server_info() )
++            		syslog('error', message)
++            		syslog('mysql', message)
++
++        	# add a cache memory
++        	self._cache = {}
++        	self._cachedate = 0
++
++	def __db_connect__(self):
++		return mm_cfg.cursor
++	def __del__(self):
++        # Cleaning up
++        	try:
++            		mm_cfg.cursor.close()
++       		except:
++            		pass
++        	try:
++            		mm_cfg.connection.close()
++        	except:
++            		pass
++        	if mm_cfg.MYSQL_MEMBER_DB_VERBOSE:
++            	# Message to indicate successful close.
++            		syslog("error", "MysqlMemberships $Revision: 1.69 $ unloaded" )
++            		syslog("mysql", "MysqlMemberships $Revision: 1.69 $ unloaded" )
++
++	
++
++	# empty the cache (when we touch a value)
++    	def uncache(self):
++        	self._cache = {}
++        	self._cachedate = time.localtime()[tm_min]
++
++    	# Apply query on list (manages both 'flat' and 'wide' modes)
++    	def query(self, query):
++        	if mm_cfg.MYSQL_MEMBER_DB_VERBOSE:
++            		syslog('mysql', query)
++        	mm_cfg.cursor.execute(query)
++		mm_cfg.connection.commit()
++		return
++
++	 # return all members according to a certain condition
++    	def queryall(self, query, cache=False):
++        	self.query(query)
++        	# get the number of rows in the resultset
++        	numrows = int(mm_cfg.cursor.rowcount)
++        	# save one at a time
++        	results = []
++        	for x in range(0,numrows):
++            		row = mm_cfg.cursor.fetchone()
++            		results.append(row[0])
++            		# we don't want to cache the whole list for global requests
++            		if cache and numrows < 1000:
++                		self._cache[row[1]] = row[2:]
++        	return results
++
++    	# select *, cache it, then return only the field that's asked for
++    	def select(self, what, where=''):
++        	query = "SELECT " + what \
++            		+ ",address,name,user_options,delivery_status,lang,digest " \
++            		+ "FROM %s WHERE %s" %(self._table, self._where)
++        	if where:
++            		query += " AND %s" %(where)
++        	return self.queryall(query + ' ORDER BY address', True)
++
++        def select_on(self, what, address):
++            if self._cachedate != time.localtime()[tm_min]:
++                self.uncache()
++            try:
++                a = self._cache[address]
++                if what == 'name':
++                    num = 0
++                elif what == 'user_options':
++                    num = 1
++                elif what == 'delivery_status':
++                    num = 2
++                elif what == 'lang':
++                    num = 3
++                elif what == 'digest':
++                    num = 4
++                a = [ a[num] ]
++            except:
++                a = self.select(what,
++                    "address='%s'" %(self.escape(address)))
++            return a
++
++        def update_on(self, what, value, address):
++            if what == 'delivery_status':
++                dst = ", delivery_status_timestamp=NOW() "
++            else:
++                dst = ""
++            self.query("UPDATE %s " %(self._table)
++                    + ("SET %s = '%s' " %(what, self.escape(value))
++                    + dst
++                    + ("WHERE %s " %(self._where))
++                    + ("AND address = '%s'" %(self.escape(address)))))
++            # remove the cache
++            self.uncache()
++    
++        def escape(self, value):
++            # transforms accents into html entities (&#233;)
++            # TODO: find out which language is current (here: assumes iso-8859-1)
++            value = Utils.uncanonstr(value)
++    
++            return value
++	def db_cookie_to_mail(self,c):
++		if c.has_key(self._cookiename):
++			hash=c[self._cookiename]
++			query = self._queryCookieMail %hash
++			mm_cfg.cursor.execute(query)
++			attrs = mm_cfg.cursor.fetchone()
++			if attrs!= None :
++				usernames = attrs[0]
++				return usernames
++		return False
++
++	def db_cookie_to_id(self,c):
++		if self._cookiename and c.has_key(self._cookiename):
++			users=[]
++			hash=c[self._cookiename]
++			query=self._queryCookieId % hash
++			mm_cfg.cursor.execute(query)
++			attrs = mm_cfg.cursor.fetchone()
++			if attrs!= None :
++				users = attrs[0]
++				return users
++		return False
++
++	def db_id_to_monitored(self,user_id):
++		query=self._queryIsMonitoring %(str(user_id),self.__mlist.internal_name())
++		mm_cfg.cursor.execute(query)
++		result = mm_cfg.cursor.fetchone()
++		if result[0] == 0:
++			return False
++		if result[0] >= 1:
++			return True
++	
++	def db_isAdmin(self,user_id):
++		query = self._queryIsAdmin  %(str(user_id),self.__mlist.internal_name())
++		mm_cfg.cursor.execute(query)
++		result = mm_cfg.cursor.fetchone()
++		if result[0] == 0:
++			return False
++		if result[0] >= 1:
++			return True
++	def db_isSiteAdmin(self,user_id):
++		query = self._queryIsSiteAdmin  %(str(user_id))
++		mm_cfg.cursor.execute(query)
++		result = mm_cfg.cursor.fetchone()
++		if result[0] == 0:
++			return False
++		if result[0] >= 1:
++			return True
++
++    ############################### Now the active codes #######
++        #
++        # Read interface
++        #
++    
++        # All members
++        def getMembers(self):
++            return self.select('address')
++    
++        # regular members
++        def getRegularMemberKeys(self):
++            return self.select('address', "digest = 'N'")
++    
++        # digest members
++        def getDigestMemberKeys(self):
++            return self.select('address', "digest = 'Y'")
++    
++        # status (regular/digest) of a member (returns a key - lowercase)
++        def __get_cp_member(self, member):
++            lcmember = member.lower()
++            digest = self.select_on('digest', lcmember)
++            if len(digest):
++                if digest is 'Y':
++                    return lcmember, ISDIGEST
++                else:
++                    return lcmember, ISREGULAR
++            return None, None
++    
++        # is she a member?
++        def isMember(self, member):
++            member = self.select_on('name', member)
++            if len(member):
++                return 1
++            return 0
++    
++        # Covered by SQL __get_cp_member()
++        def getMemberKey(self, member):
++            cpaddr, where = self.__get_cp_member(member)
++            if cpaddr is None:
++                raise Errors.NotAMemberError, member
++            return member.lower()
++    
++        # Covered by SQL __get_cp_member()
++        def getMemberCPAddress(self, member):
++            cpaddr, where = self.__get_cp_member(member)
++            if cpaddr is None:
++                raise Errors.NotAMemberError, member
++            return cpaddr
++    
++        # Covered by SQL __get_cp_member()
++        def getMemberCPAddresses(self, members):
++            return [self.__get_cp_member(member)[0] for member in members]
++    
++        # SELECT password FROM <listname> WHERE address = member.lower()
++        def getMemberPassword(self, member):
++            password = self.select_on('password', member)
++            if len(password):
++                return password[0]
++            else:
++                raise Errors.NotAMemberError, member
++    
++        # Covered by SQL getMemberPassword()
++        def authenticateMember(self, member, response):
++            secret = self.getMemberPassword(member)
++            if secret == md5_new(response).hexdigest():
++                return secret
++            return 0
++    
++        # Covered by SQL isMember()
++        def __assertIsMember(self, member):
++            if not self.isMember(member):
++                raise Errors.NotAMemberError, member
++    
++        def getMemberLanguage(self, member):
++            lang = self.select_on('lang',member)
++            if len(lang) and lang[0] in self.__mlist.GetAvailableLanguages():
++                return lang[0]
++            else:
++                return self.__mlist.preferred_language
++    
++        # getOptions: different methods for digest and other (bitfield) options
++        def getMemberOption(self, member, flag):
++            self.__assertIsMember(member)
++            if flag == mm_cfg.Digests:
++                cpaddr, where = self.__get_cp_member(member)
++                return where == ISDIGEST
++            options = self.select_on('user_options', member)
++            if len(options):
++                return not not (options[0] & flag)
++    
++    
++        # new method to gest faster results when searching a user in the admin Gui
++        def getMembersMatching(self, regexp):
++            return self.select('address',
++                "(address REGEXP '%s' OR name REGEXP '%s')"
++                %( self.escape(regexp), self.escape(regexp) ) )
++    
++        # new method to get faster results when querying the number of subscribers
++        def getMembersCount(self, reason=None):
++            if reason:
++                where = " AND digest='%s'" %reason
++            else:
++                where = ""
++            self.query("SELECT COUNT(*) FROM %s WHERE %s%s" %(
++              self._table, self._where, where))
++            count = mm_cfg.cursor.fetchone()
++            return int(count[0])
++    
++        # get member's name (slow method if you need many)
++        # due to the way escape() is built, names are stored in html
++        # format in the DB, hence the canonstr() to put them back to
++        # normal (TODO)
++        def getMemberName(self, member):
++            name = self.select_on('name', member)
++            if len(name):
++              try:
++                return Utils.canonstr(name[0])
++              except:
++                return name[0]
++            self.__assertIsMember(member)
++    
++        # topics
++        def getMemberTopics(self, member):
++            topics = self.select_on('topics_userinterest',member)
++            if len(topics) and isinstance(topics[0], str):
++                return topics[0].split(',')
++            return []
++            self.__assertIsMember(member)
++    
++        # delivery status
++        def getDeliveryStatus(self, member):
++            status = self.select_on('delivery_status',member)
++            if len(status):
++                if status[0] in (MemberAdaptor.ENABLED, MemberAdaptor.UNKNOWN,
++                              MemberAdaptor.BYUSER, MemberAdaptor.BYADMIN,
++                              MemberAdaptor.BYBOUNCE):
++                    return status[0]
++                else:
++                    return MemberAdaptor.ENABLED
++            self.__assertIsMember(member)
++    
++    
++        # delivery status change time
++        def getDeliveryStatusChangeTime(self, member):
++            time = self.select_on('delivery_status_timestamp',member)
++            if len(time):
++                time = time[0]
++                if time is '0':
++                    return MemberAdaptor.ENABLED
++                else:
++                    return time
++            self.__assertIsMember(member)
++    
++        # Covered by SQL getMembers(), and getDeliveryStatus().
++        def getDeliveryStatusMembers(self, status=(MemberAdaptor.UNKNOWN,
++                                                   MemberAdaptor.BYUSER,
++                                                   MemberAdaptor.BYADMIN,
++                                                   MemberAdaptor.BYBOUNCE)):
++            return [member for member in self.getMembers()
++                    if self.getDeliveryStatus(member) in status]
++    
++        # show bouncing members
++        def getBouncingMembers(self):
++	    mm_cfg.cursor = self.__db_connect__()
++            self.query("""SELECT bi_cookie,bi_score,bi_noticesleft,
++                UNIX_TIMESTAMP(bi_lastnotice),UNIX_TIMESTAMP(bi_date),address
++                FROM %s WHERE %s""" %(self._table, self._where))
++            # get the number of rows in the resultset
++            numrows = int(mm_cfg.cursor.rowcount)
++            # save one address at a time
++            bounce_info_list = []
++            for x in range(0,numrows):
++                row = mm_cfg.cursor.fetchone()
++                # We must not return anything if there is
++                # no bounce info for that member to start with.
++                if row[4] > 0:
++                    # Append the member name to the bounce info list.
++                    bounce_info_list.append(row[5])
++            return [member.lower() for member in bounce_info_list]
++    
++        def getBounceInfo(self, member):
++	    mm_cfg.cursor = self.__db_connect__()
++            self.query("""SELECT
++                bi_score,
++                bi_noticesleft,
++                EXTRACT(YEAR FROM bi_lastnotice),
++                EXTRACT(MONTH FROM bi_lastnotice),
++                EXTRACT(DAY FROM bi_lastnotice),
++                EXTRACT(YEAR FROM bi_date),
++                EXTRACT(MONTH FROM bi_date),
++                EXTRACT(DAY FROM bi_date),
++                bi_cookie
++                FROM %s WHERE %s AND """ %(self._table, self._where)
++                + ("address = '%s'" %( self.escape(member) ) ))
++            numrows = int(mm_cfg.cursor.rowcount)
++            if numrows is 0:
++                self.__assertIsMember(member)
++            row = mm_cfg.cursor.fetchone()
++            # We must not return a _BounceInfo instance if there is no bounce info
++            # to start with.
++            if row[3] <= 0:
++                return None;
++            # Otherwise, populate a bounce_info structure.
++            bounce_info = _BounceInfo(member, row[0],
++                (row[5],row[6],row[7]), row[1])
++            bounce_info.lastnotice = (row[2],row[3],row[4])
++            bounce_info.cookie = row[8]
++            return bounce_info
++    
++    
++        #
++        # Write interface
++        #
++        def addNewMember(self, member, **kws):
++    #        assert self.__mlist.Locked()
++            # Make sure this address isn't already a member
++            if self.isMember(member):
++                raise Errors.MMAlreadyAMember, member
++            # Parse the keywords
++            digest = 0
++            password = Utils.MakeRandomPassword()
++            language = self.__mlist.preferred_language
++            realname = None
++            if kws.has_key('digest'):
++                digest = kws['digest']
++                del kws['digest']
++            if kws.has_key('password'):
++                password = kws['password']
++                del kws['password']
++            if kws.has_key('language'):
++                language = kws['language']
++                del kws['language']
++            if kws.has_key('realname'):
++                realname = kws['realname']
++                del kws['realname']
++            # Assert that no other keywords are present
++            if kws:
++                raise ValueError, kws.keys()
++            # If the localpart has uppercase letters in it, then the value in the
++            # members (or digest_members) dict is the case preserved address.
++            # Otherwise the value is 0.  Note that the case of the domain part is
++            # of course ignored.
++            if Utils.LCDomain(member) == member.lower():
++                value = 0
++            else:
++                value = member
++                member = member.lower()
++            if digest:
++                digest = 'Y'
++            else:
++                digest = 'N'
++            # All we need to do here is add the address.
++            # and Set the member's default set of options
++            if self.__mlist.new_member_options:
++                options = self.__mlist.new_member_options
++            else:
++                options = 0
++            query = "INSERT INTO %s " \
++                + "(address, user_options, password, lang, " \
++                + "digest, delivery_status,listname) values " \
++                + "('%s',%s,'%s','%s','%s','%s','%s')"
++            query = query %( self._table,
++                self.escape(member), options, md5_new(password).hexdigest(),
++                language, digest, MemberAdaptor.ENABLED,self.__mlist.internal_name())
++            if mm_cfg.MYSQL_MEMBER_DB_VERBOSE:
++                syslog('mysql',query)
++	    mm_cfg.cursor.execute(query)
++	    mm_cfg.connection.commit()
++            if realname:
++                self.setMemberName(member, realname)
++    
++        def removeMember(self, member):
++    #        assert self.__mlist.Locked()
++            self.__assertIsMember(member)
++            self.query("DELETE FROM %s WHERE %s " %(self._table, self._where)
++                + ("AND address = '%s'" %( self.escape(member.lower()) ) ))
++            self.uncache()
++    
++        def changeMemberAddress(self, member, newaddress, nodelete=0):
++    #        assert self.__mlist.Locked()
++            # Make sure this address isn't already a member
++            if self.isMember(newaddress):
++                raise Errors.MMAlreadyAMember, newaddress
++            self.update_on('address', newaddress, member)
++    
++        def setMemberPassword(self, member, password):
++    #        assert self.__mlist.Locked()
++            self.update_on('password', md5_new(password).hexdigest(), member)
++    
++        def setMemberLanguage(self, member, lang):
++    #        assert self.__mlist.Locked()
++            self.update_on('lang', lang, member)
++    
++        def setMemberOption(self, member, flag, value):
++    #        assert self.__mlist.Locked()
++            if flag == mm_cfg.Digests:
++                if value:
++                    # Be sure the list supports digest delivery
++                    if not self.__mlist.digestable:
++                        raise Errors.CantDigestError
++                    # The user is turning on digest mode
++                    # If they are already receiving digests, report an error.
++                    if self.getMemberOption(member, mm_cfg.Digests) is 'Y':
++                        raise Errors.AlreadyReceivingDigests, member
++                    # If we've got past all this, actually turn on digest mode.
++                    self.update_on('digest', 'Y', member)
++                else:
++                    # Be sure the list supports regular delivery
++                    if not self.__mlist.nondigestable:
++                        raise Errors.MustDigestError
++                    # The user is turning off digest mode
++                    # If they are already receiving regular, report an error.
++                    if self.getMemberOption(member, mm_cfg.Digests) is 'N':
++                        raise Errors.AlreadyReceivingRegularDeliveries, member
++                    # If we've got past all this, actually turn off digest mode.
++                    self.update_on('digest', 'N', member)
++                return
++    
++            # Apparently, mysql supports the & and | operators, so this should
++            # work, maybe. Will have to suck it and see for the moment.
++            # If the value is non-zero, set the bitfield indicated by 'flag'.
++            if value:
++                self.query("UPDATE %s " %(self._table)
++                    + ("SET user_options = user_options | %s " %(flag))
++                    + "WHERE %s " %(self._where)
++                    + ("AND address = '%s'" %( self.escape(member) ) ))
++            else:
++                self.query("UPDATE %s " %(self._table)
++                    + ("SET user_options = user_options & ~%s " %(flag))
++                    + "WHERE %s " %(self._where)
++                    + ("AND address = '%s'" %( self.escape(member) ) ))
++            # remove the cache
++            self.uncache()
++    
++        def setMemberName(self, member, name):
++    #        assert self.__mlist.Locked()
++            self.update_on('name', name, member)
++    
++        def setMemberTopics(self, member, topics):
++    #        assert self.__mlist.Locked()
++            if isinstance(topics,list):
++              topics=",".join(topics)
++            else:
++              topics=""
++            self.query("UPDATE %s " %(self._table)
++                + ("SET topics_userinterest = '%s' " %(
++                  self.escape(topics) ))
++                + "WHERE %s " %(self._where)
++                + ("AND address = '%s'" %( self.escape(member) )))
++    
++        def setDeliveryStatus(self, member, status):
++            assert status in (MemberAdaptor.ENABLED,  MemberAdaptor.UNKNOWN,
++                              MemberAdaptor.BYUSER,   MemberAdaptor.BYADMIN,
++                              MemberAdaptor.BYBOUNCE)
++    #        assert self.__mlist.Locked()
++            member = member.lower()
++            if status == MemberAdaptor.ENABLED:
++                # Enable by resetting their bounce info.
++                self.setBounceInfo(member, None)
++            else:
++                self.query("UPDATE %s " %(self._table)
++                    + ("SET delivery_status = '%s', " %(status))
++                    + "delivery_status_timestamp=NOW() WHERE %s " %(self._where)
++                    + ("AND address = '%s'" %( self.escape(member) )))
++            # remove the cache
++            self.uncache()                                                
++    
++        def setBounceInfo(self, member, info):
++    #        assert self.__mlist.Locked()
++            member = member.lower()
++            if info is None:
++                self.query("UPDATE %s " %(self._table)
++                    + ("SET delivery_status = '%s', " %(MemberAdaptor.ENABLED))
++                    + "bi_cookie = NULL, "
++                    + "bi_score = 0, "
++                    + "bi_noticesleft = 0, "
++		    + "bi_lastnotice = '1901-01-01'::date, "
++		    + "bi_date = '1901-01-01'::date "
++                    + "WHERE %s " %(self._where)
++                    + ("AND address = '%s'" %( self.escape(member) )))
++            else:
++                # Hack the dates to work with MySQL.
++                lnsql = time.strftime("%Y-%m-%d", time.strptime('-'.join(map(str,info.lastnotice)),'%Y-%m-%d'))
++                datesql = time.strftime("%Y-%m-%d", time.strptime('-'.join(map(str,info.date)),'%Y-%m-%d'))
++                self.query("UPDATE %s " %(self._table)
++                    + (("SET bi_cookie = '%s', "
++                        + "bi_score = %s, "
++                        + "bi_noticesleft = %s, "
++                        + "bi_lastnotice = '%s', "
++                        + "bi_date = '%s' ") %(
++                            info.cookie, info.score,
++                            info.noticesleft, lnsql, datesql
++                        ))
++                    + ("WHERE %s " %(self._where))
++                    + ("AND address = '%s'" %( self.escape(member) )))
++    
++    
++    
++    # this function can be plugged into Mailman.MailList.Save
++    # it saves a copy of a few list's attributes into a database
++        def SaveToDb(self,dict):
++            query = 'REPLACE lists (listname,moderation,advertised,new_member_options,subscribe_policy,host_name,description,info,count) ' \
++                " VALUES ('%s','%s','%s','%s','%s','%s','%s','%s','%s')" % (\
++                self.internal_name(), \
++                self.default_member_moderation, \
++                self.advertised, \
++                self.new_member_options, \
++                self.subscribe_policy, \
++                self.host_name, \
++                self.escape(self.description), \
++                self.escape(self.info), \
++                self.getMembersCount() \
++                )
++            syslog('mysql', query)
++            try:
++                self.query(query)
++            except Exception,e:
++                syslog('mysql', 'error %s'%e)
++            pass
+diff -ruN mailman.old/Mailman/ForgeSecurityManager.py mailman/Mailman/ForgeSecurityManager.py
+--- Mailman/ForgeSecurityManager.py	1970-01-01 01:00:00.000000000 +0100
++++ Mailman/ForgeSecurityManager.py	2010-03-29 17:47:50.000000000 +0200
+@@ -0,0 +1,382 @@
++
++# Copyright (C) 1998-2008 by the Free Software Foundation, Inc.
++#
++# This program is free software; you can redistribute it and/or
++# modify it under the terms of the GNU General Public License
++# as published by the Free Software Foundation; either version 2
++# of the License, or (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
++# USA.
++
++
++"""Handle passwords and sanitize approved messages."""
++
++# There are current 5 roles defined in Mailman, as codified in Defaults.py:
++# user, list-creator, list-moderator, list-admin, site-admin.
++#
++# Here's how we do cookie based authentication.
++#
++# Each role (see above) has an associated password, which is currently the
++# only way to authenticate a role (in the future, we'll authenticate a
++# user and assign users to roles).
++#
++# Each cookie has the following ingredients: the authorization context's
++# secret (i.e. the password, and a timestamp.  We generate an SHA1 hex
++# digest of these ingredients, which we call the `mac'.  We then marshal
++# up a tuple of the timestamp and the mac, hexlify that and return that as
++# a cookie keyed off the authcontext.  Note that authenticating the user
++# also requires the user's email address to be included in the cookie.
++#
++# The verification process is done in CheckCookie() below.  It extracts
++# the cookie, unhexlifies and unmarshals the tuple, extracting the
++# timestamp.  Using this, and the shared secret, the mac is calculated,
++# and it must match the mac passed in the cookie.  If so, they're golden,
++# otherwise, access is denied.
++#
++# It is still possible for an adversary to attempt to brute force crack
++# the password if they obtain the cookie, since they can extract the
++# timestamp and create macs based on password guesses.  They never get a
++# cleartext version of the password though, so security rests on the
++# difficulty and expense of retrying the cgi dialog for each attempt.  It
++# also relies on the security of SHA1.
++
++import os
++import re
++import time
++import sys
++import Cookie
++import marshal
++import binascii
++import urllib
++from types import StringType, TupleType
++from urlparse import urlparse
++
++try:
++    import crypt
++except ImportError:
++    crypt = None
++
++from Mailman import mm_cfg
++from Mailman import Utils
++from Mailman import Errors
++from Mailman.Logging.Syslog import syslog
++try:
++     from Mailman.Utils import md5_new, sha_new
++except ImportError:
++     import md5
++     import sha
++     md5_new=md5.new
++     sha_new=sha.new
++from Mailman import SecurityManager
++
++try:
++    True, False
++except NameError:
++    True = 1
++    False = 0
++
++
++
++class ForgeSecurityManager(SecurityManager.SecurityManager):
++    def __init__(self,mlist):
++	self.__mlist = mlist	
++        # We used to set self.password here, from a crypted_password argument,
++        # but that's been removed when we generalized the mixin architecture.
++        # self.password is really a SecurityManager attribute, but it's set in
++        # MailList.InitVars().
++        self.mod_password = None
++        # Non configurable
++        self.__mlist.passwords = {}
++
++    def AuthContextInfo(self, authcontext, user=None):
++        # authcontext may be one of AuthUser, AuthListModerator,
++        # AuthListAdmin, AuthSiteAdmin.  Not supported is the AuthCreator
++        # context.
++        #
++        # user is ignored unless authcontext is AuthUser
++        #
++        # Return the authcontext's secret and cookie key.  If the authcontext
++        # doesn't exist, return the tuple (None, None).  If authcontext is
++        # AuthUser, but the user isn't a member of this mailing list, a
++        # NotAMemberError will be raised.  If the user's secret is None, raise
++        # a MMBadUserError.
++        key = self.__mlist.internal_name() + '+'
++        if authcontext == mm_cfg.AuthUser:
++            if user is None:
++                # A bad system error
++                raise TypeError, 'No user supplied for AuthUser context'
++            secret = self.__mlist.getMemberPassword(user)
++            userdata = urllib.quote(Utils.ObscureEmail(user), safe='')
++            key += 'user+%s' % userdata
++        elif authcontext == mm_cfg.AuthListModerator:
++            secret = self.mod_password
++            key += 'moderator'
++        elif authcontext == mm_cfg.AuthListAdmin:
++            secret = self.__mlist.password
++            key += 'admin'
++        # BAW: AuthCreator
++        elif authcontext == mm_cfg.AuthSiteAdmin:
++            sitepass = Utils.get_global_password()
++            if mm_cfg.ALLOW_SITE_ADMIN_COOKIES and sitepass:
++                secret = sitepass
++                key = 'site'
++            else:
++                # BAW: this should probably hand out a site password based
++                # cookie, but that makes me a bit nervous, so just treat site
++                # admin as a list admin since there is currently no site
++                # admin-only functionality.
++                secret = self.__mlist.password
++                key += 'admin'
++        else:
++            return None, None
++        return key, secret
++
++    def Authenticate(self, authcontexts, response, user=None):
++        # Given a list of authentication contexts, check to see if the
++        # response matches one of the passwords.  authcontexts must be a
++        # sequence, and if it contains the context AuthUser, then the user
++        # argument must not be None.
++        #
++        # Return the authcontext from the argument sequence that matches the
++        # response, or UnAuthorized.
++        for ac in authcontexts:
++            if ac == mm_cfg.AuthCreator:
++                ok = Utils.check_global_password(response, siteadmin=0)
++                if ok:
++                    return mm_cfg.AuthCreator
++            elif ac == mm_cfg.AuthSiteAdmin:
++                ok = Utils.check_global_password(response)
++                if ok:
++                    return mm_cfg.AuthSiteAdmin
++            elif ac == mm_cfg.AuthListAdmin:
++                def cryptmatchp(response, secret):
++                    try:
++                        salt = secret[:2]
++                        if crypt and crypt.crypt(response, salt) == secret:
++                            return True
++                        return False
++                    except TypeError:
++                        # BAW: Hard to say why we can get a TypeError here.
++                        # SF bug report #585776 says crypt.crypt() can raise
++                        # this if salt contains null bytes, although I don't
++                        # know how that can happen (perhaps if a MM2.0 list
++                        # with USE_CRYPT = 0 has been updated?  Doubtful.
++                        return False
++                # The password for the list admin and list moderator are not
++                # kept as plain text, but instead as an sha hexdigest.  The
++                # response being passed in is plain text, so we need to
++                # digestify it first.  Note however, that for backwards
++                # compatibility reasons, we'll also check the admin response
++                # against the crypted and md5'd passwords, and if they match,
++                # we'll auto-migrate the passwords to sha.
++                key, secret = self.AuthContextInfo(ac)
++                if secret is None:
++                    continue
++                sharesponse = sha_new(response).hexdigest()
++                upgrade = ok = False
++                if sharesponse == secret:
++                    ok = True
++                elif md5_new(response).digest() == secret:
++                    ok = upgrade = True
++                elif cryptmatchp(response, secret):
++                    ok = upgrade = True
++                if upgrade:
++                    save_and_unlock = False
++                    if not self.__mlist.Locked():
++                        self.__mlist.Lock()
++                        save_and_unlock = True
++                    try:
++                        self.__mlist.password = sharesponse
++                        if save_and_unlock:
++                            self.__mlist.Save()
++                    finally:
++                        if save_and_unlock:
++                            self.__mlist.Unlock()
++                if ok:
++                    return ac
++            elif ac == mm_cfg.AuthListModerator:
++                # The list moderator password must be sha'd
++                key, secret = self.AuthContextInfo(ac)
++                if secret and sha_new(response).hexdigest() == secret:
++                    return ac
++            elif ac == mm_cfg.AuthUser:
++                if user is not None:
++                    try:
++                        if self.__mlist.authenticateMember(user, response):
++                            return ac
++                    except Errors.NotAMemberError:
++                        pass
++            else:
++                # What is this context???
++                syslog('error', 'Bad authcontext: %s', ac)
++                raise ValueError, 'Bad authcontext: %s' % ac
++        return mm_cfg.UnAuthorized
++
++    def WebAuthenticate(self, authcontexts, response, user=None):
++        # Given a list of authentication contexts, check to see if the cookie
++        # contains a matching authorization, falling back to checking whether
++        # the response matches one of the passwords.  authcontexts must be a
++        # sequence, and if it contains the context AuthUser, then the user
++        # argument should not be None.
++        #
++        # Returns a flag indicating whether authentication succeeded or not.
++        for ac in authcontexts:
++            ok = self.CheckCookie(ac,user)
++            if ok:
++                return True
++        # Check passwords
++        ac = self.Authenticate(authcontexts, response, user)
++        if ac:
++            print self.MakeCookie(ac, user)
++            return True
++        return False
++
++    def MakeCookie(self, authcontext, user=None):
++        key, secret = self.AuthContextInfo(authcontext, user)
++        if key is None or secret is None or not isinstance(secret, StringType):
++            raise ValueError
++        # Timestamp
++        issued = int(time.time())
++        # Get a digest of the secret, plus other information.
++        mac = sha_new(secret + `issued`).hexdigest()
++        # Create the cookie object.
++        c = Cookie.SimpleCookie()
++        c[key] = binascii.hexlify(marshal.dumps((issued, mac)))
++        # The path to all Mailman stuff, minus the scheme and host,
++        # i.e. usually the string `/mailman'
++        path = urlparse(self.__mlist.web_page_url)[2]
++        c[key]['path'] = path
++        # We use session cookies, so don't set `expires' or `max-age' keys.
++        # Set the RFC 2109 required header.
++        c[key]['version'] = 1
++        return c
++
++    def ZapCookie(self, authcontext, user=None):
++        # We can throw away the secret.
++        key, secret = self.AuthContextInfo(authcontext, user)
++        # Logout of the session by zapping the cookie.  For safety both set
++        # max-age=0 (as per RFC2109) and set the cookie data to the empty
++        # string.
++        c = Cookie.SimpleCookie()
++        c[key] = ''
++        # The path to all Mailman stuff, minus the scheme and host,
++        # i.e. usually the string `/mailman'
++        path = urlparse(self.__mlist.web_page_url)[2]
++        c[key]['path'] = path
++        c[key]['max-age'] = 0
++        # Don't set expires=0 here otherwise it'll force a persistent cookie
++        c[key]['version'] = 1
++        return c
++    
++    def CheckCookie(self, authcontext, user):
++	cookiedata = os.environ.get('HTTP_COOKIE')
++	if not cookiedata:
++		return False
++	c = parsecookie(cookiedata)
++	if authcontext == mm_cfg.AuthUser:
++		if user:
++                	usernames = [user]
++		else:
++			usernames = []
++			usernames = self.__mlist.db_cookie_to_mail(c)	
++		if usernames :
++			for user in usernames:
++				ok =  self.__checkone(c, authcontext, user)
++				if ok:
++					return True
++               	usernames = []
++               	prefix = self.__mlist.internal_name() + '+user+'
++               	for k in c.keys():
++                 	if k.startswith(prefix):
++                        	usernames.append(k[len(prefix):])
++            	# If any check out, we're golden.  Note: `@'s are no longer legal
++            	# values in cookie keys.
++            	for user in [Utils.UnobscureEmail(urllib.unquote(u))
++                         for u in usernames]:
++                	ok = self.__checkone(c, authcontext, user)
++                	if ok:
++                    		return True
++            	return False
++	else:
++		return self.__checkone(c,authcontext, user)
++
++    def __checkone(self, c, authcontext, user):
++        try:
++            key, secret = self.AuthContextInfo(authcontext, user)
++        except Errors.NotAMemberError:
++            return False
++	user_id = self.__mlist.db_cookie_to_id(c)
++	if user_id :
++		monitored = self.__mlist.db_id_to_monitored(user_id)
++		isAdmin = self.__mlist.db_isAdmin(user_id)
++		isSiteAdmin = self.__mlist.db_isSiteAdmin(user_id)
++		if authcontext == mm_cfg.AuthUser:    
++			if not monitored:
++				return False
++			else :
++				return True
++		elif authcontext == mm_cfg.AuthListAdmin:
++			if not isAdmin: 
++				return False
++			else :
++				return True
++		elif authcontext == mm_cfg.AuthListModerator:
++			if not isAdmin :
++				return False
++			else :
++				return True
++		elif authcontext == mm_cfg.AuthSiteAdmin:
++			if not isSiteAdmin :
++				return False
++			else :
++				return True
++	if not c.has_key(key) or not isinstance(secret, StringType):
++            return False
++        # Undo the encoding we performed in MakeCookie() above.  BAW: I
++        # believe this is safe from exploit because marshal can't be forced to
++        # load recursive data structures, and it can't be forced to execute
++        # any unexpected code.  The worst that can happen is that either the
++        # client will have provided us bogus data, in which case we'll get one
++        # of the caught exceptions, or marshal format will have changed, in
++        # which case, the cookie decoding will fail.  In either case, we'll
++        # simply request reauthorization, resulting in a new cookie being
++        # returned to the client.
++        try:
++            data = marshal.loads(binascii.unhexlify(c[key]))
++            issued, received_mac = data
++        except (EOFError, ValueError, TypeError, KeyError):
++            return False
++        # Make sure the issued timestamp makes sense
++        now = time.time()
++        if now < issued:
++            return False
++        # Calculate what the mac ought to be based on the cookie's timestamp
++        # and the shared secret.
++        mac = sha_new(secret + `issued`).hexdigest()
++        if mac <> received_mac:
++            return False
++        # Authenticated!
++        return True
++
++
++splitter = re.compile(';\s*')
++
++def parsecookie(s):
++    c = {}
++    for line in s.splitlines():
++        for p in splitter.split(line):
++            try:
++                k, v = p.split('=', 1)
++            except ValueError:
++                pass
++            else:
++                c[k] = v
++    return c
+diff -ruN mailman.old/Mailman/MailList.py mailman/Mailman/MailList.py
+--- Mailman/MailList.py	2009-04-24 10:33:18.000000000 +0200
++++ Mailman/MailList.py	2011-05-06 19:23:56.000000000 +0200
+@@ -57,6 +57,7 @@
+ from Mailman.HTMLFormatter import HTMLFormatter
+ from Mailman.ListAdmin import ListAdmin
+ from Mailman.SecurityManager import SecurityManager
++from Mailman.OldSecurityManager import OldSecurityManager
+ from Mailman.TopicMgr import TopicMgr
+ from Mailman import Pending
+ 
+@@ -85,7 +86,7 @@
+ 
+ # Use mixins here just to avoid having any one chunk be too large.
+ class MailList(HTMLFormatter, Deliverer, ListAdmin,
+-               Archiver, Digester, SecurityManager, Bouncer, GatewayManager,
++               Archiver, Digester, Bouncer, GatewayManager,
+                Autoresponder, TopicMgr, Pending.Pending):
+ 
+     #
+@@ -103,12 +104,21 @@
+         self.InitTempVars(name)
+         # Default membership adaptor class
+         self._memberadaptor = OldStyleMemberships(self)
++	# Default security manager class
++	self._securitymanager = OldSecurityManager(self)
+         # This extension mechanism allows list-specific overrides of any
+         # method (well, except __init__(), InitTempVars(), and InitVars()
+         # I think).  Note that fullpath() will return None when we're creating
+         # the list, which will only happen when name is None.
+         if name is None:
+             return
++       	defaultfile = os.path.join(self.fullpath(), 'extend.py')
++    	if os.path.exists(defaultfile):
++		filename = defaultfile
++	else:
++        	filename = os.path.join(self.fullpath().strip(self.internal_name()), 'extend.py')
++       	dict = {}
++
+         filename = os.path.join(self.fullpath(), 'extend.py')
+         dict = {}
+         try:
+@@ -120,9 +130,13 @@
+             else:
+                 syslog('error', 'IOError reading list extension: %s', e)
+         else:
+-            func = dict.get('extend')
++            func = dict.get('extendMemberAdaptor')
+             if func:
+                 func(self)
++	    func = dict.get('extendSecurityManager')
++	    if func:
++		func(self)
++       	
+         if lock:
+             # This will load the database.
+             self.Lock()
+@@ -136,14 +150,18 @@
+         # order.
+         try:
+             return getattr(self._memberadaptor, name)
++	    getattr(self._securitymanager, name)
+         except AttributeError:
+-            for guicomponent in self._gui:
+-                try:
+-                    return getattr(guicomponent, name)
+-                except AttributeError:
+-                    pass
+-            else:
+-                raise AttributeError, name
++	    try:
++                return getattr(self._securitymanager, name)
++	    except AttributeError:
++                for guicomponent in self._gui:
++                    try:
++                        return getattr(guicomponent, name)
++                    except AttributeError:
++                        pass
++                else:
++                    raise AttributeError, name
+ 
+     def __repr__(self):
+         if self.Locked():
+diff -ruN mailman.old/Mailman/MySQLConnector.py mailman/Mailman/MySQLConnector.py
+--- Mailman/MySQLConnector.py	1970-01-01 01:00:00.000000000 +0100
++++ Mailman/MySQLConnector.py	2010-03-29 17:47:50.000000000 +0200
+@@ -0,0 +1,42 @@
++
++# Copyright (C) 1998-2008 by the Free Software Foundation, Inc.
++#
++# This program is free software; you can redistribute it and/or
++# modify it under the terms of the GNU General Public License
++# as published by the Free Software Foundation; either version 2
++# of the License, or (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
++# USA.
++
++
++import os
++import sys
++import re
++import time
++from types import StringType, TupleType
++
++
++from Mailman import ExternalConnector 
++from Mailman import mm_cfg
++from Mailman import Utils
++from Mailman.Logging.Syslog import syslog
++import MySQLdb
++class MySQLConnector(ExternalConnector.ExternalConnector):
++	def __init__(self,mlist,param):
++		ExternalConnector.ExternalConnector.__init__(self,mlist,param)
++	def __db_connect__(self):
++		if mm_cfg.connection ==0: 
++			connection = MySQLdb.connect (host = self._param['dbhost'], user = self._param['dbuser'], passwd = self._param['dbpassword'],db = self._param['database'])
++			mm_cfg.connection = connection
++			mm_cfg.cursor = connection.cursor()
++			connection.commit()
++		return mm_cfg.cursor
++
+diff -ruN mailman.old/Mailman/OldSecurityManager.py mailman/Mailman/OldSecurityManager.py
+--- Mailman/OldSecurityManager.py	1970-01-01 01:00:00.000000000 +0100
++++ Mailman/OldSecurityManager.py	2011-05-06 19:43:46.000000000 +0200
+@@ -0,0 +1,361 @@
++# Copyright (C) 1998-2006 by the Free Software Foundation, Inc.
++#
++# This program is free software; you can redistribute it and/or
++# modify it under the terms of the GNU General Public License
++# as published by the Free Software Foundation; either version 2
++# of the License, or (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
++# USA.
++
++
++"""Handle passwords and sanitize approved messages."""
++
++# There are current 5 roles defined in Mailman, as codified in Defaults.py:
++# user, list-creator, list-moderator, list-admin, site-admin.
++#
++# Here's how we do cookie based authentication.
++#
++# Each role (see above) has an associated password, which is currently the
++# only way to authenticate a role (in the future, we'll authenticate a
++# user and assign users to roles).
++#
++# Each cookie has the following ingredients: the authorization context's
++# secret (i.e. the password, and a timestamp.  We generate an SHA1 hex
++# digest of these ingredients, which we call the `mac'.  We then marshal
++# up a tuple of the timestamp and the mac, hexlify that and return that as
++# a cookie keyed off the authcontext.  Note that authenticating the user
++# also requires the user's email address to be included in the cookie.
++#
++# The verification process is done in CheckCookie() below.  It extracts
++# the cookie, unhexlifies and unmarshals the tuple, extracting the
++# timestamp.  Using this, and the shared secret, the mac is calculated,
++# and it must match the mac passed in the cookie.  If so, they're golden,
++# otherwise, access is denied.
++#
++# It is still possible for an adversary to attempt to brute force crack
++# the password if they obtain the cookie, since they can extract the
++# timestamp and create macs based on password guesses.  They never get a
++# cleartext version of the password though, so security rests on the
++# difficulty and expense of retrying the cgi dialog for each attempt.  It
++# also relies on the security of SHA1.
++
++import os
++import re
++import sha
++import time
++import Cookie
++import marshal
++import binascii
++import urllib
++from types import StringType, TupleType
++from urlparse import urlparse
++
++try:
++    import crypt
++except ImportError:
++    crypt = None
++import md5
++
++from Mailman import mm_cfg
++from Mailman import Utils
++from Mailman import Errors
++from Mailman.Logging.Syslog import syslog
++from Mailman import SecurityManager
++
++try:
++    True, False
++except NameError:
++    True = 1
++    False = 0
++
++
++
++class OldSecurityManager(SecurityManager.SecurityManager):
++    def __init__(self,mlist):
++	self.__mlist = mlist	
++        # We used to set self.password here, from a crypted_password argument,
++        # but that's been removed when we generalized the mixin architecture.
++        # self.password is really a SecurityManager attribute, but it's set in
++        # MailList.InitVars().
++        self.mod_password = None
++        # Non configurable
++        self.__mlist.passwords = {}
++
++    def AuthContextInfo(self, authcontext, user=None):
++        # authcontext may be one of AuthUser, AuthListModerator,
++        # AuthListAdmin, AuthSiteAdmin.  Not supported is the AuthCreator
++        # context.
++        #
++        # user is ignored unless authcontext is AuthUser
++        #
++        # Return the authcontext's secret and cookie key.  If the authcontext
++        # doesn't exist, return the tuple (None, None).  If authcontext is
++        # AuthUser, but the user isn't a member of this mailing list, a
++        # NotAMemberError will be raised.  If the user's secret is None, raise
++        # a MMBadUserError.
++        key = self.__mlist.internal_name() + '+'
++        if authcontext == mm_cfg.AuthUser:
++            if user is None:
++                # A bad system error
++                raise TypeError, 'No user supplied for AuthUser context'
++            secret = self.__mlist.getMemberPassword(user)
++            userdata = urllib.quote(Utils.ObscureEmail(user), safe='')
++            key += 'user+%s' % userdata
++        elif authcontext == mm_cfg.AuthListModerator:
++            secret = self.mod_password
++            key += 'moderator'
++        elif authcontext == mm_cfg.AuthListAdmin:
++            secret = self.__mlist.password
++            key += 'admin'
++        # BAW: AuthCreator
++        elif authcontext == mm_cfg.AuthSiteAdmin:
++            sitepass = Utils.get_global_password()
++            if mm_cfg.ALLOW_SITE_ADMIN_COOKIES and sitepass:
++                secret = sitepass
++                key = 'site'
++            else:
++                # BAW: this should probably hand out a site password based
++                # cookie, but that makes me a bit nervous, so just treat site
++                # admin as a list admin since there is currently no site
++                # admin-only functionality.
++                secret = self.__mlist.password
++                key += 'admin'
++        else:
++            return None, None
++        return key, secret
++
++    def Authenticate(self, authcontexts, response, user=None):
++        # Given a list of authentication contexts, check to see if the
++        # response matches one of the passwords.  authcontexts must be a
++        # sequence, and if it contains the context AuthUser, then the user
++        # argument must not be None.
++        #
++        # Return the authcontext from the argument sequence that matches the
++        # response, or UnAuthorized.
++        for ac in authcontexts:
++            if ac == mm_cfg.AuthCreator:
++                ok = Utils.check_global_password(response, siteadmin=0)
++                if ok:
++                    return mm_cfg.AuthCreator
++            elif ac == mm_cfg.AuthSiteAdmin:
++                ok = Utils.check_global_password(response)
++                if ok:
++                    return mm_cfg.AuthSiteAdmin
++            elif ac == mm_cfg.AuthListAdmin:
++                def cryptmatchp(response, secret):
++                    try:
++                        salt = secret[:2]
++                        if crypt and crypt.crypt(response, salt) == secret:
++                            return True
++                        return False
++                    except TypeError:
++                        # BAW: Hard to say why we can get a TypeError here.
++                        # SF bug report #585776 says crypt.crypt() can raise
++                        # this if salt contains null bytes, although I don't
++                        # know how that can happen (perhaps if a MM2.0 list
++                        # with USE_CRYPT = 0 has been updated?  Doubtful.
++                        return False
++                # The password for the list admin and list moderator are not
++                # kept as plain text, but instead as an sha hexdigest.  The
++                # response being passed in is plain text, so we need to
++                # digestify it first.  Note however, that for backwards
++                # compatibility reasons, we'll also check the admin response
++                # against the crypted and md5'd passwords, and if they match,
++                # we'll auto-migrate the passwords to sha.
++                key, secret = self.AuthContextInfo(ac)
++                if secret is None:
++                    continue
++                sharesponse = sha.new(response).hexdigest()
++                upgrade = ok = False
++                if sharesponse == secret:
++                    ok = True
++                elif md5.new(response).digest() == secret:
++                    ok = upgrade = True
++                elif cryptmatchp(response, secret):
++                    ok = upgrade = True
++                if upgrade:
++                    save_and_unlock = False
++                    if not self.__mlist.Locked():
++                        self.__mlist.Lock()
++                        save_and_unlock = True
++                    try:
++                        self._mlist.password = sharesponse
++                        if save_and_unlock:
++                            self.__mlist.Save()
++                    finally:
++                        if save_and_unlock:
++                            self.Unlock()
++                if ok:
++                    return ac
++            elif ac == mm_cfg.AuthListModerator:
++                # The list moderator password must be sha'd
++                key, secret = self.AuthContextInfo(ac)
++                if secret and sha.new(response).hexdigest() == secret:
++                    return ac
++            elif ac == mm_cfg.AuthUser:
++                if user is not None:
++                    try:
++                        if self.__mlist.authenticateMember(user, response):
++                            return ac
++                    except Errors.NotAMemberError:
++                        pass
++            else:
++                # What is this context???
++                syslog('error', 'Bad authcontext: %s', ac)
++                raise ValueError, 'Bad authcontext: %s' % ac
++        return mm_cfg.UnAuthorized
++
++    def WebAuthenticate(self, authcontexts, response, user=None):
++        # Given a list of authentication contexts, check to see if the cookie
++        # contains a matching authorization, falling back to checking whether
++        # the response matches one of the passwords.  authcontexts must be a
++        # sequence, and if it contains the context AuthUser, then the user
++        # argument should not be None.
++        #
++        # Returns a flag indicating whether authentication succeeded or not.
++        for ac in authcontexts:
++	    ok = self.CheckCookie(ac,user)	
++            if ok:
++                return True
++        # Check passwords
++        ac = self.Authenticate(authcontexts, response, user)
++        if ac:
++            print self.MakeCookie(ac, user)
++            return True
++        return False
++
++    def MakeCookie(self, authcontext, user=None):
++        key, secret = self.AuthContextInfo(authcontext, user)
++        if key is None or secret is None or not isinstance(secret, StringType):
++            raise ValueError
++        # Timestamp
++        issued = int(time.time())
++        # Get a digest of the secret, plus other information.
++        mac = sha.new(secret + `issued`).hexdigest()
++        # Create the cookie object.
++        c = Cookie.SimpleCookie()
++        c[key] = binascii.hexlify(marshal.dumps((issued, mac)))
++        # The path to all Mailman stuff, minus the scheme and host,
++        # i.e. usually the string `/mailman'
++        path = urlparse(self.__mlist.web_page_url)[2]
++        c[key]['path'] = path
++        # We use session cookies, so don't set `expires' or `max-age' keys.
++        # Set the RFC 2109 required header.
++        c[key]['version'] = 1
++        return c
++
++    def ZapCookie(self, authcontext, user=None):
++        # We can throw away the secret.
++        key, secret = self.AuthContextInfo(authcontext, user)
++        # Logout of the session by zapping the cookie.  For safety both set
++        # max-age=0 (as per RFC2109) and set the cookie data to the empty
++        # string.
++        c = Cookie.SimpleCookie()
++        c[key] = ''
++        # The path to all Mailman stuff, minus the scheme and host,
++        # i.e. usually the string `/mailman'
++        path = urlparse(self.__mlist.web_page_url)[2]
++        c[key]['path'] = path
++        c[key]['max-age'] = 0
++        # Don't set expires=0 here otherwise it'll force a persistent cookie
++        c[key]['version'] = 1
++        return c
++
++    def CheckCookie(self, authcontext, user=None):
++        # Two results can occur: we return 1 meaning the cookie authentication
++        # succeeded for the authorization context, we return 0 meaning the
++        # authentication failed.
++        #
++        # Dig out the cookie data, which better be passed on this cgi
++        # environment variable.  If there's no cookie data, we reject the
++        # authentication.
++        cookiedata = os.environ.get('HTTP_COOKIE')
++        if not cookiedata:
++            return False
++        # We can't use the Cookie module here because it isn't liberal in what
++        # it accepts.  Feed it a MM2.0 cookie along with a MM2.1 cookie and
++        # you get a CookieError. :(.  All we care about is accessing the
++        # cookie data via getitem, so we'll use our own parser, which returns
++        # a dictionary.
++        c = parsecookie(cookiedata)
++        # If the user was not supplied, but the authcontext is AuthUser, we
++        # can try to glean the user address from the cookie key.  There may be
++        # more than one matching key (if the user has multiple accounts
++        # subscribed to this list), but any are okay.
++        if authcontext == mm_cfg.AuthUser:
++            if user:
++                usernames = [user]
++            else:
++                usernames = []
++                prefix = self.__mlist.internal_name() + '+user+'
++                for k in c.keys():
++                    if k.startswith(prefix):
++                        usernames.append(k[len(prefix):])
++            # If any check out, we're golden.  Note: `@'s are no longer legal
++            # values in cookie keys.
++            for user in [Utils.UnobscureEmail(u) for u in usernames]:
++                ok = self.__checkone(c, authcontext, user)
++                if ok:
++                    return True
++            return False
++        else:
++            return self.__checkone(c, authcontext, user)
++
++    def __checkone(self, c, authcontext, user):
++        # Do the guts of the cookie check, for one authcontext/user
++        # combination.
++        try:
++            key, secret = self.AuthContextInfo(authcontext, user)
++        except Errors.NotAMemberError:
++            return False
++        if not c.has_key(key) or not isinstance(secret, StringType):
++            return False
++        # Undo the encoding we performed in MakeCookie() above.  BAW: I
++        # believe this is safe from exploit because marshal can't be forced to
++        # load recursive data structures, and it can't be forced to execute
++        # any unexpected code.  The worst that can happen is that either the
++        # client will have provided us bogus data, in which case we'll get one
++        # of the caught exceptions, or marshal format will have changed, in
++        # which case, the cookie decoding will fail.  In either case, we'll
++        # simply request reauthorization, resulting in a new cookie being
++        # returned to the client.
++        try:
++            data = marshal.loads(binascii.unhexlify(c[key]))
++            issued, received_mac = data
++        except (EOFError, ValueError, TypeError, KeyError):
++            return False
++        # Make sure the issued timestamp makes sense
++        now = time.time()
++        if now < issued:
++            return False
++        # Calculate what the mac ought to be based on the cookie's timestamp
++        # and the shared secret.
++        mac = sha.new(secret + `issued`).hexdigest()
++        if mac <> received_mac:
++            return False
++        # Authenticated!
++        return True
++
++
++
++splitter = re.compile(';\s*')
++
++def parsecookie(s):
++    c = {}
++    for line in s.splitlines():
++        for p in splitter.split(line):
++            try:
++                k, v = p.split('=', 1)
++            except ValueError:
++                pass
++            else:
++                c[k] = v
++    return c
+diff -ruN mailman.old/Mailman/PsycopgConnector.py mailman/Mailman/PsycopgConnector.py
+--- Mailman/PsycopgConnector.py	1970-01-01 01:00:00.000000000 +0100
++++ Mailman/PsycopgConnector.py	2010-11-09 02:18:36.000000000 +0100
+@@ -0,0 +1,53 @@
++# Copyright (C) 1998-2008 by the Free Software Foundation, Inc.
++#
++# This program is free software; you can redistribute it and/or
++# modify it under the terms of the GNU General Public License
++# as published by the Free Software Foundation; either version 2
++# of the License, or (at your option) any later version.
++#
++# This program is distributed in the hope that it will be useful,
++# but WITHOUT ANY WARRANTY; without even the implied warranty of
++# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++# GNU General Public License for more details.
++#
++# You should have received a copy of the GNU General Public License
++# along with this program; if not, write to the Free Software
++# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301,
++# USA.
++
++
++import os
++import sys
++import re
++import time
++from types import StringType, TupleType
++
++from Mailman import ExternalConnector 
++
++from Mailman import mm_cfg
++from Mailman import Utils
++from Mailman.Logging.Syslog import syslog
++
++
++
++class PsycopgConnector(ExternalConnector.ExternalConnector):
++	def __init__(self,mlist,param):
++		ExternalConnector.ExternalConnector.__init__(self,mlist,param)
++	def __db_connect__(self):
++		if mm_cfg.connection == 0:
++			try:
++				# Dirty ack, I dunno exactly why I really need this for web
++				distdir = os.path.join(sys.prefix, 'lib', 'python'+sys.version[:3],'dist-packages')
++				sys.path.append(distdir)
++				import psycopg2
++			except ImportError:
++				return False
++			if self._param['dbhost']<> "127.0.0.1" and self._param['dbhost']<> "127.0.1.1" and self._param['dbhost']<> "":
++				connection = psycopg2.connect (host = self._param['dbhost'], user = self._param['dbuser'], password = self._param['dbpassword'], database = self._param['database'])
++			else :
++				connection = psycopg2.connect (user = self._param['dbuser'], password = self._param['dbpassword'], database = self._param['database'])
++			mm_cfg.connection = connection
++			mm_cfg.cursor=connection.cursor()
++			connection.commit()
++		return mm_cfg.cursor
++
