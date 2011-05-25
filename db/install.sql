@@ -22,3 +22,13 @@ CREATE TABLE plugin_mailman (
   bi_date date NOT NULL default '1901-01-01',
   PRIMARY KEY  (listname,address(200))
 );
+
+-- Create service for all projects (but disabled)
+INSERT INTO service(group_id, label, description, short_name, link, is_active, is_used, scope, rank)
+SELECT DISTINCT group_id , 'Mailman' , 'Mailman plugin' , 'plugin_mailman', CONCAT('/plugins/mailman/?group_id=', group_id), 1 , 0 , 'system',  81
+FROM service
+WHERE group_id NOT IN (SELECT group_id
+    FROM service
+    WHERE short_name
+    LIKE 'plugin_mailman');
+
