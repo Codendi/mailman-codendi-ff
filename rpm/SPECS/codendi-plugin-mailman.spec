@@ -36,7 +36,7 @@ It provides a single sign on authentication mecanism between the forge and mailm
 %{_datadir}/codendi/plugins/mailman
 
 %post
-patch -d %{_libdir}/mailman/ -p0 < %{_datadir}/codendi/plugins/mailman/usr/lib/mailman/Mailman/codendi.diff
+patch -d /usr/lib/mailman/ -p0 < %{_datadir}/codendi/plugins/mailman/usr/lib/mailman/Mailman/codendi.diff
 %{__cp} -a %{_datadir}/codendi/plugins/mailman/var/lib/mailman/lists/extendcodendi.py %{_var}/lib/mailman/lists/extend.py
 
 
