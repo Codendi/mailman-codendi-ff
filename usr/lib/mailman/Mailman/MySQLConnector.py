@@ -28,6 +28,7 @@ from Mailman import ExternalConnector
 from Mailman import mm_cfg
 from Mailman import Utils
 from Mailman.Logging.Syslog import syslog
+sys.path.append('/usr/lib64/python2.4/site-packages/')
 import MySQLdb
 class MySQLConnector(ExternalConnector.ExternalConnector):
 	def __init__(self,mlist,param):
