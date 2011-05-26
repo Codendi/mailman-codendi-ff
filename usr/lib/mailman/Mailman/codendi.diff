@@ -1104,7 +1104,7 @@ diff -ruN mailman.old/Mailman/MailList.py mailman/Mailman/MailList.py
                 Autoresponder, TopicMgr, Pending.Pending):
  
      #
-@@ -103,12 +104,21 @@
+@@ -103,14 +104,21 @@
          self.InitTempVars(name)
          # Default membership adaptor class
          self._memberadaptor = OldStyleMemberships(self)
@@ -1116,17 +1116,18 @@ diff -ruN mailman.old/Mailman/MailList.py mailman/Mailman/MailList.py
          # the list, which will only happen when name is None.
          if name is None:
              return
-+       	defaultfile = os.path.join(self.fullpath(), 'extend.py')
-+    	if os.path.exists(defaultfile):
-+		filename = defaultfile
-+	else:
-+        	filename = os.path.join(self.fullpath().strip(self.internal_name()), 'extend.py')
-+       	dict = {}
-+
-         filename = os.path.join(self.fullpath(), 'extend.py')
+-        filename = os.path.join(self.fullpath(), 'extend.py')
++        defaultfile = os.path.join(self.fullpath(), 'extend.py')
++        if os.path.exists(defaultfile):
++            filename = defaultfile
++        else:
++            filename = os.path.join(self.fullpath().strip(self.internal_name()), 'extend.py')
          dict = {}
++        
          try:
-@@ -120,9 +130,13 @@
+             execfile(filename, dict)
+         except IOError, e:
+@@ -120,9 +128,13 @@
              else:
                  syslog('error', 'IOError reading list extension: %s', e)
          else:
@@ -1141,7 +1142,7 @@ diff -ruN mailman.old/Mailman/MailList.py mailman/Mailman/MailList.py
          if lock:
              # This will load the database.
              self.Lock()
-@@ -136,14 +150,18 @@
+@@ -136,14 +148,18 @@
          # order.
          try:
              return getattr(self._memberadaptor, name)
