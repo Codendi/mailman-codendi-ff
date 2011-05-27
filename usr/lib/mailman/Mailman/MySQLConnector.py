@@ -28,13 +28,16 @@ from Mailman import ExternalConnector
 from Mailman import mm_cfg
 from Mailman import Utils
 from Mailman.Logging.Syslog import syslog
-sys.path.append('/usr/lib64/python2.4/site-packages/')
-import MySQLdb
+
 class MySQLConnector(ExternalConnector.ExternalConnector):
 	def __init__(self,mlist,param):
 		ExternalConnector.ExternalConnector.__init__(self,mlist,param)
 	def __db_connect__(self):
 		if mm_cfg.connection ==0: 
+			distdir = os.path.join(sys.prefix, 'lib64', 'python'+sys.version[:3],'site-packages')
+			sys.path.append(distdir)
+			import MySQLdb
+			
 			connection = MySQLdb.connect (host = self._param['dbhost'], user = self._param['dbuser'], passwd = self._param['dbpassword'],db = self._param['database'])
 			mm_cfg.connection = connection
 			mm_cfg.cursor = connection.cursor()
