@@ -39,6 +39,12 @@ It provides a single sign on authentication mecanism between the forge and mailm
 patch -d /usr/lib/mailman/ -p0 < %{_datadir}/codendi/plugins/mailman/usr/lib/mailman/Mailman/codendi.diff
 %{__cp} -a %{_datadir}/codendi/plugins/mailman/var/lib/mailman/lists/extendcodendi.py %{_var}/lib/mailman/lists/extend.py
 
+%preun
+if [ $1 = 0 ]; then
+  patch -d /usr/lib/mailman/ -p0 -R < %{_datadir}/codendi/plugins/mailman/usr/lib/mailman/Mailman/codendi.diff
+fi
+# rpm should not abort if last command run had non-zero exit status, exit cleanly
+exit 0
 
 %changelog
 * Tue May 11 2010 Nicolas TERRAY <nicolas.terray@xrce.xerox.com> - 1.0
