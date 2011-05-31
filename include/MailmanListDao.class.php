@@ -37,7 +37,7 @@ class MailmanListDao extends DataAccessObject {
 	 * return all active lists
 	 * @return DataAccessResult
 	 */
-	function & searchAllActiveML() {
+	function searchAllActiveML() {
 		$sql = "SELECT * 
 			FROM mail_group_list 
 			WHERE is_public IN (0,1)";
@@ -48,7 +48,7 @@ class MailmanListDao extends DataAccessObject {
 	 * Searches by group_list_id
 	 * @return DataAccessResult
 	 */
-	function & searchByGroupListId($group_list_id) {
+	function searchByGroupListId($group_list_id) {
 		$group_list_id = $this->da->quoteSmart($group_list_id);
 		$sql = "SELECT * FROM mail_group_list 
 			WHERE group_list_id = $1";
@@ -58,7 +58,7 @@ class MailmanListDao extends DataAccessObject {
 	 * Searches by list_name
 	 * @return DataAccessResult
 	 */
-	function & searchByName($realListName) {
+	function searchByName($realListName) {
 		$realListName = $this->da->quoteSmart($realListName);
 		$sql = 'SELECT 1 FROM mail_group_list WHERE lower(list_name)=$1';
 		return $this->retrieve($sql,array($realListName));
@@ -67,7 +67,7 @@ class MailmanListDao extends DataAccessObject {
 	 * Searches by group_id
 	 * @return DataAccessResult
 	 */
-	function & searchByGroupId($group_id) {
+	function searchByGroupId($group_id) {
 		$group_id = $this->da->quoteSmart($group_id);
 		$sql = "SELECT * FROM mail_group_list 
 			WHERE group_id = $1 ORDER BY group_list_id";
@@ -77,7 +77,7 @@ class MailmanListDao extends DataAccessObject {
 	 * Searches data with group_list_id and group_id
 	 * @return DataAccessResult
 	 */
-	function & searchListFromGroup($group_list_id,$group_id) {
+	function searchListFromGroup($group_list_id,$group_id) {
 		$group_id = $this->da->quoteSmart($group_id);
 		$group_list_id = $this->da->quoteSmart($group_list_id);
 		$sql = "SELECT * FROM mail_group_list 
@@ -85,7 +85,7 @@ class MailmanListDao extends DataAccessObject {
 		return $this->retrieve($sql,array($group_id,$group_list_id));
 	}
 
-	function & insertNewList($group_id, $realListName,$isPublic,$listPassword,$creator_id,$requested,$description) {
+	function insertNewList($group_id, $realListName,$isPublic,$listPassword,$creator_id,$requested,$description) {
 		$group_id = $this->da->quoteSmart($group_id);
 		$realListName = $this->da->quoteSmart($realListName);
 		$isPublic = $this->da->quoteSmart($isPublic);
@@ -127,14 +127,14 @@ class MailmanListDao extends DataAccessObject {
 		$sql="DELETE FROM  plugin_mailman WHERE listname=$1 AND address=$2;";
 		return $this->update($sql,array($listname,$usermail));
 	}
-	function & userIsMonitoring($usermail,$listname) {
+	function userIsMonitoring($usermail,$listname) {
 		$usermail = $this->da->quoteSmart($usermail);
 		$listname = $this->da->quoteSmart($listname);
 		$sql="SELECT count(*) AS count FROM plugin_mailman WHERE address=$1 AND listname=$2;";
 		return $this->retrieve($sql,array($usermail,$listname));
 	}
 	
-	function & listsMonitoredByUser($usermail) {
+	function listsMonitoredByUser($usermail) {
 		$usermail = $this->da->quoteSmart($usermail);
 		$sql="SELECT groups.group_name,groups.group_id,mail_group_list.group_list_id,mail_group_list.list_name ".
 		     "FROM groups,mail_group_list,plugin_mailman ".
@@ -145,7 +145,7 @@ class MailmanListDao extends DataAccessObject {
 		return $this->retrieve($sql,array($usermail));
 	}
 
-	function & compareInfos($mail) {
+	function compareInfos($mail) {
 		$mail = $this->da->quoteSmart($mail);
 		$sql="SELECT password, name FROM  plugin_mailman WHERE address=$1;";
 		return $this->retrieve($sql,array($mail));
