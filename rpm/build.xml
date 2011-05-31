@@ -19,4 +19,12 @@
 		cleanBuildDir="false"
 		failOnError="true" />
     </target>
+    <target name="clean">
+	<delete>
+		<fileset dir="SOURCES" />
+		<fileset dir="RPMS" />
+		<fileset dir="SRPMS" />
+		<fileset dir="BUILD" />
+	</delete>
+    </target>
 </project>
