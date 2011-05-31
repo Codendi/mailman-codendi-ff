@@ -167,7 +167,7 @@ function display_list_admin($currentList)
 			echo "<tr class='".$class."'>";
 			echo '<td>'.$currentList->getName().'</td> ';
 		}
-		if($currentList->getStatus() == '1') {
+		if(forge_get_config('mailman_lists_need_activation') && $currentList->getStatus() == '1') {
 			if($currentList->activationRequested()){
 				echo	'<td>'._('Not activated yet').'</td>';
 			}
