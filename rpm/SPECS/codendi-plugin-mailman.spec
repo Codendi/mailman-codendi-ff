@@ -40,9 +40,7 @@ patch -d /usr/lib/mailman/ -p0 < %{_datadir}/codendi/plugins/mailman/usr/lib/mai
 %{__cp} -a %{_datadir}/codendi/plugins/mailman/var/lib/mailman/lists/extendcodendi.py %{_var}/lib/mailman/lists/extend.py
 
 %preun
-if [ $1 = 0 ]; then
-  patch -d /usr/lib/mailman/ -p0 -R < %{_datadir}/codendi/plugins/mailman/usr/lib/mailman/Mailman/codendi.diff
-fi
+patch -d /usr/lib/mailman/ -p0 -R < %{_datadir}/codendi/plugins/mailman/usr/lib/mailman/Mailman/codendi.diff
 # rpm should not abort if last command run had non-zero exit status, exit cleanly
 exit 0
 
