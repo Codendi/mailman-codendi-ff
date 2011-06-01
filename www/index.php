@@ -35,6 +35,26 @@ if (isset ($group_id)) {
 	elseif ($mlFactory->isError()) {
 		exit_error(_('Error'), $mlFactory->getErrorMessage());
 	}
+	
+	if ($request->exist('action')) {
+		if ($request->exist('id')) {
+			$list = new MailmanList($group_id, $request->get('id'));
+			switch ($request->get('action')) {
+				case 'subscribe' :
+					$list->subscribe();
+					break;
+				case 'unsubscribe' :
+					$list->unsubscribe();
+					break;
+				default :
+					break;
+			}
+		}
+		if ($request->get('action') == 'update') {
+			$mlFactory->updateInfos();
+		}
+
+	}
 
 	mailman_header(array (
 		'title' => _('Mailing Lists for') . $Group->getPublicName(),
@@ -87,12 +107,6 @@ if (isset ($group_id)) {
 				case 'options' :
 					$list->getOptionsURL();
 					break;
-				case 'subscribe' :
-					$list->subscribe();
-					break;
-				case 'unsubscribe' :
-					$list->unsubscribe();
-					break;
 				case 'pipermail' :
 					$list->getArchivesUrl();
 					break;
@@ -103,10 +117,6 @@ if (isset ($group_id)) {
 					break;
 			}
 		}
-		if ($request->get('action') == 'update') {
-			$mlFactory->updateInfos();
-		}
-
 	}
 	mail_footer(array ());
 
