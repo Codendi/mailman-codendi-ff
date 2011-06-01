@@ -215,6 +215,7 @@ function mailman_header($params) {
 	if (isset($params['help']) && $params['help']) {
 		helpButton($params['help']);
 	}
+	echo '</b></p>';
 
 }
 
