@@ -38,6 +38,10 @@ It provides a single sign on authentication mecanism between the forge and mailm
 %post
 patch -d /usr/lib/mailman/ -p0 < %{_datadir}/codendi/plugins/mailman/usr/lib/mailman/Mailman/codendi.diff
 %{__cp} -a %{_datadir}/codendi/plugins/mailman/var/lib/mailman/lists/extendcodendi.py %{_var}/lib/mailman/lists/extend.py
+perl -pi -e "s/%sys_dbpasswd%/`php -r 'include("/etc/codendi/conf/database.inc"); echo $sys_dbpasswd;'`/" /var/lib/mailman/lists/extend.py 
+perl -pi -e "s/%sys_dbname%/`php -r 'include("/etc/codendi/conf/database.inc"); echo $sys_dbname;'`/" /var/lib/mailman/lists/extend.py 
+perl -pi -e "s/%sys_dbhost%/`php -r 'include("/etc/codendi/conf/database.inc"); echo $sys_dbhost;'`/" /var/lib/mailman/lists/extend.py 
+perl -pi -e "s/%sys_dbuser%/`php -r 'include("/etc/codendi/conf/database.inc"); echo $sys_dbuser;'`/" /var/lib/mailman/lists/extend.py 
 
 %preun
 patch -d /usr/lib/mailman/ -p0 -R < %{_datadir}/codendi/plugins/mailman/usr/lib/mailman/Mailman/codendi.diff

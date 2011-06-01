@@ -5,10 +5,10 @@ import os
 def extendMemberAdaptor(list):
     dbparam={}
     #Config to connect to database
-    dbparam['dbhost'] = "127.0.0.1"
-    dbparam['dbuser']= "codendiadm"
-    dbparam['dbpassword'] = "mypassword"
-    dbparam['database'] = "codendi"
+    dbparam['dbhost'] = "%sys_dbhost%"
+    dbparam['dbuser']= "%sys_dbuser%"
+    dbparam['dbpassword'] = "%sys_dbpasswd%"
+    dbparam['database'] = "%sys_dbname%"
     dbparam['refresh'] = 360
 
     dbparam['mailman_table']= 'plugin_mailman'#table where mailman stores memeberships info
