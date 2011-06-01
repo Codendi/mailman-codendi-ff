@@ -6,7 +6,7 @@
  */
 require_once 'pre.php';
 require_once dirname(__FILE__) .'/../include/MailmanListDao.class.php';
-$sql = "SELECT * from mail_group_list WHERE status=3";
+$sql = "SELECT * from mail_group_list WHERE status = 1";
 $result = db_query_params($sql,array());
 while($row = db_fetch_array($result)) {
 	$members= null;
