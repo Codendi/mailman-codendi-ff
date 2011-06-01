@@ -205,10 +205,10 @@ function mailman_header($params) {
 	// admin link is only displayed if the user is a project administrator
 	if ($current_user->isMember($request->get('group_id'),'A')) {
 		if (isset($params['admin'])){
-			echo '<A HREF="index.php?group_id='.$request->get('group_id').'">'._('Administration').'</A>';
+			echo '<A HREF="/plugins/mailman/index.php?group_id='.$request->get('group_id').'">'._('Administration').'</A>';
 		}
 		else{
-			echo '<A HREF="admin/index.php?group_id='.$request->get('group_id').'">'._('Administration').'</A>';
+			echo '<A HREF="/plugins/mailman/admin/index.php?group_id='.$request->get('group_id').'">'._('Administration').'</A>';
 		}
 
 	}
